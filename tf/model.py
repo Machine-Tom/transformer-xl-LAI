@@ -74,6 +74,7 @@ def rel_multihead_attn(w, r, r_w_bias, r_r_bias, attn_mask, mems, d_model,
     BD = rel_shift(BD)
 
     attn_score = (AC + BD) * scale
+
     attn_mask_t = attn_mask[:, :, None, None]
     attn_score = attn_score * (1 - attn_mask_t) - 1e30 * attn_mask_t
 
@@ -544,3 +545,189 @@ def transformer(dec_inp, target, mems, n_token, n_layer, d_model, d_embed,
         proj_same_dim=proj_same_dim)
     return loss, new_mems
 
+def transformer_inference(dec_inp, mems, mems_id, n_token, n_layer, d_model, d_embed,
+                n_head, d_head, d_inner, dropout, dropatt,
+                initializer, is_training, proj_initializer=None,
+                mem_len=None, cutoffs=[], div_val=1, tie_projs=[],
+                same_length=False, clamp_len=-1, use_tpu=True,
+                input_perms=None, target_perms=None, head_target=None,
+                untie_r=False, proj_same_dim=True,
+                scope='transformer'):
+    """
+    cutoffs: a list of python int. Cutoffs for adaptive softmax.
+    tie_projs: a list of python bools. Whether to tie the projections.
+    use_tpu: if True, use one_hot in embedding lookup and bin-based implementation
+          of adaptive softmax.
+    perms: a list of tensors. Each tensor should of size [len, bsz, bin_size].
+          Only used in the adaptive setting.
+    """
+    # dec_inp = tf.Print(dec_inp, [dec_inp], "print of input in inference : ")
+    new_mems = []
+    with tf.variable_scope(scope):
+        if untie_r:
+            r_w_bias = tf.get_variable('r_w_bias', [n_layer, n_head, d_head],
+                                       initializer=initializer)
+            r_r_bias = tf.get_variable('r_r_bias', [n_layer, n_head, d_head],
+                                       initializer=initializer)
+        else:
+            r_w_bias = tf.get_variable('r_w_bias', [n_head, d_head],
+                                       initializer=initializer)
+            r_r_bias = tf.get_variable('r_r_bias', [n_head, d_head],
+                                       initializer=initializer)
+
+        qlen = tf.shape(dec_inp)[0]
+        mlen = tf.shape(mems[0])[0] if mems is not None else 0
+        klen = mlen + qlen
+
+        if proj_initializer is None:
+            proj_initializer = initializer
+        lookup_fn = (mul_adaptive_embedding_lookup if use_tpu else
+                     mask_adaptive_embedding_lookup)
+        embeddings, shared_params = lookup_fn(
+            x=dec_inp,
+            n_token=n_token,
+            d_embed=d_embed,
+            d_proj=d_model,
+            cutoffs=cutoffs,
+            initializer=initializer,
+            proj_initializer=proj_initializer,
+            div_val=div_val,
+            perms=input_perms,
+            proj_same_dim=proj_same_dim)
+
+        attn_mask = _create_mask(qlen, mlen, same_length)
+
+        pos_seq = tf.range(klen - 1, -1, -1.0)
+        if clamp_len > 0:
+            pos_seq = tf.minimum(pos_seq, clamp_len)
+        inv_freq = 1 / (10000 ** (tf.range(0, d_model, 2.0) / d_model))
+        pos_emb = positional_embedding(pos_seq, inv_freq)
+
+        output = tf.layers.dropout(embeddings, dropout, training=is_training)
+        pos_emb = tf.layers.dropout(pos_emb, dropout, training=is_training)
+
+        if mems is None:
+            mems = [None] * n_layer
+
+        if mems_id is None:
+            mems_id = [None] * n_layer
+        
+        ### LAI: New variable-new_mem_id, all_attn_prob
+        new_mem_id = []
+        all_attn_prob = []
+        for i in range(n_layer):
+            # cache new mems
+            new_mems.append(_cache_mem(output, mems[i], mem_len))
+            new_mem_id.append(_cache_mem(dec_inp, mems_id[i], mem_len))
+
+            with tf.variable_scope('layer_{}'.format(i)):
+                output, attn_prob = rel_multihead_attn_for_inference(
+                    w=output,
+                    r=pos_emb,
+                    r_w_bias=r_w_bias if not untie_r else r_w_bias[i],
+                    r_r_bias=r_r_bias if not untie_r else r_r_bias[i],
+                    attn_mask=attn_mask, 
+                    mems=mems[i],
+                    d_model=d_model,
+                    n_head=n_head,
+                    d_head=d_head,
+                    dropout=dropout,
+                    dropatt=dropatt,
+                    is_training=is_training,
+                    kernel_initializer=initializer)
+                all_attn_prob.append(attn_prob)
+
+                output = positionwise_FF(
+                    inp=output,
+                    d_model=d_model,
+                    d_inner=d_inner,
+                    dropout=dropout,
+                    kernel_initializer=initializer,
+                    is_training=is_training)
+
+        output = tf.layers.dropout(output, dropout, training=is_training)
+        idx_output = compute_output(output, n_token, cutoffs, shared_params)
+
+        return new_mems, idx_output, new_mem_id, all_attn_prob
+
+
+def compute_output(hidden, n_token, cutoffs, params, scope='adaptive_softmax'):
+    def _logit(x, W, b, proj):
+        y = x
+        if proj is not None:
+            y = tf.einsum('ibd,ed->ibe', y, proj)
+        return tf.einsum('ibd,nd->ibn', y, W) + b
+
+    params_W, params_projs = params[0], params[1]
+
+    with tf.variable_scope(scope):
+        if len(cutoffs) == 0:
+            softmax_b = tf.get_variable('bias', [n_token],
+                                        initializer=tf.zeros_initializer())
+            output_idx = _logit(hidden, params_W, softmax_b, params_projs)
+            return output_idx
+
+
+def _cache_mem_id(curr_input, prev_mem, mem_len=None):
+    if mem_len is None or prev_mem is None:
+        new_mem = curr_input
+    elif mem_len == 0:
+        return prev_mem
+    else:
+        new_mem = tf.concat([prev_mem, curr_input], 0)[- mem_len:]
+
+    return new_mem
+
+
+def rel_multihead_attn_for_inference(w, r, r_w_bias, r_r_bias, attn_mask, mems, d_model,
+                       n_head, d_head, dropout, dropatt, is_training,
+                       kernel_initializer, scope='rel_attn'):
+    scale = 1 / (d_head ** 0.5)
+    with tf.variable_scope(scope):
+        qlen = tf.shape(w)[0]
+        rlen = tf.shape(r)[0]
+        bsz = tf.shape(w)[1]
+
+        cat = tf.concat([mems, w],
+                        0) if mems is not None and mems.shape.ndims > 1 else w
+        w_heads = tf.layers.dense(cat, 3 * n_head * d_head, use_bias=False,
+                                  kernel_initializer=kernel_initializer, name='qkv')
+        r_head_k = tf.layers.dense(r, n_head * d_head, use_bias=False,
+                                   kernel_initializer=kernel_initializer, name='r')
+
+        w_head_q, w_head_k, w_head_v = tf.split(w_heads, 3, -1)
+        w_head_q = w_head_q[-qlen:]
+
+        klen = tf.shape(w_head_k)[0]
+
+        w_head_q = tf.reshape(w_head_q, [qlen, bsz, n_head, d_head])
+        w_head_k = tf.reshape(w_head_k, [klen, bsz, n_head, d_head])
+        w_head_v = tf.reshape(w_head_v, [klen, bsz, n_head, d_head])
+
+        r_head_k = tf.reshape(r_head_k, [rlen, n_head, d_head])
+
+        rw_head_q = w_head_q + r_w_bias
+        rr_head_q = w_head_q + r_r_bias
+
+        AC = tf.einsum('ibnd,jbnd->ijbn', rw_head_q, w_head_k)
+        BD = tf.einsum('ibnd,jnd->ijbn', rr_head_q, r_head_k)
+        BD = rel_shift(BD)
+
+        attn_score = (AC + BD) * scale
+        attn_mask_t = attn_mask[:, :, None, None]
+        attn_score = attn_score * (1 - attn_mask_t) - 1e30 * attn_mask_t
+
+        attn_prob = tf.nn.softmax(attn_score, 1)
+        attn_prob = tf.layers.dropout(attn_prob, dropatt, training=is_training)
+
+        attn_vec = tf.einsum('ijbn,jbnd->ibnd', attn_prob, w_head_v)
+        size_t = tf.shape(attn_vec)
+        attn_vec = tf.reshape(attn_vec, [size_t[0], size_t[1], n_head * d_head])
+
+        attn_out = tf.layers.dense(attn_vec, d_model, use_bias=False,
+                                   kernel_initializer=kernel_initializer, name='o')
+        attn_out = tf.layers.dropout(attn_out, dropout, training=is_training)
+
+        output = tf.contrib.layers.layer_norm(attn_out + w, begin_norm_axis=-1)
+
+    return output, attn_prob

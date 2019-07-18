@@ -5,16 +5,15 @@ from __future__ import print_function
 import os
 import math
 import time
-
+from progressbar import ProgressBar
 from absl import flags
 import absl.logging as _logging  # pylint: disable=unused-import
 
 import tensorflow as tf
 import model
 import data_utils
-
 from gpu_utils import assign_to_gpu, average_grads_and_vars
-
+from postprocess import top_one_result, top_n_prob, gen_on_keyword, gen_diversity
 import numpy as np
 
 # GPU config
@@ -36,6 +35,8 @@ flags.DEFINE_bool("do_train", default=True,
       help="Whether to run training.")
 flags.DEFINE_bool("do_eval", default=False,
       help="Whether to run eval on the dev set.")
+
+
 flags.DEFINE_string("eval_ckpt_path", None,
       help="Checkpoint path for do_test evaluation."
            "If set, model_dir will be ignored."
@@ -189,11 +190,6 @@ def get_model_fn(n_token, cutoffs):
     num_params = sum([np.prod(v.shape) for v in tf.trainable_variables()])
     tf.logging.info('#params: {}'.format(num_params))
 
-    # format_str = '{{:<{0}s}}\t{{}}'.format(
-    #     max([len(v.name) for v in tf.trainable_variables()]))
-    # for v in tf.trainable_variables():
-    #   tf.logging.info(format_str.format(v.name, v.get_shape()))
-
     if is_training:
       all_vars = tf.trainable_variables()
       grads = tf.gradients(loss, all_vars)
@@ -315,7 +311,7 @@ def train(n_token, cutoffs, ps_device):
   ]
 
   saver = tf.train.Saver()
-
+  
   with tf.Session(config=tf.ConfigProto(allow_soft_placement=True)) as sess:
     sess.run(tf.global_variables_initializer())
 
@@ -336,6 +332,9 @@ def train(n_token, cutoffs, ps_device):
 
       loss_np, tower_mems_np, curr_step = fetched[:3]
       total_loss += loss_np
+      
+      if curr_step % 100 == 0:
+        print("Current step:", curr_step)
 
       if curr_step > 0 and curr_step % FLAGS.iterations == 0:
         curr_loss = total_loss / (curr_step - prev_step)
@@ -466,9 +465,9 @@ def main(unused_argv):
   tf.logging.info("n_token {}".format(n_token))
 
   if FLAGS.do_train:
-    train(n_token, cutoffs, "/gpu:0")
+    train(n_token, cutoffs, "/gpu:1")
   if FLAGS.do_eval:
-    evaluate(n_token, cutoffs, "/gpu:0")
+    evaluate(n_token, cutoffs, "/gpu:1")
 
 
 if __name__ == "__main__":
