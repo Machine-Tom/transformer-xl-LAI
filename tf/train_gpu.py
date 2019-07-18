@@ -15,6 +15,7 @@ import data_utils
 from gpu_utils import assign_to_gpu, average_grads_and_vars
 from postprocess import top_one_result, top_n_prob, gen_on_keyword, gen_diversity
 import numpy as np
+import logging
 
 # GPU config
 flags.DEFINE_integer("num_hosts", default=1,
@@ -217,6 +218,19 @@ def single_core_graph(n_token, cutoffs, is_training, inp, tgt, mems):
 
 
 def train(n_token, cutoffs, ps_device):
+  # get TF logger
+  log = logging.getLogger('tensorflow')
+  log.setLevel(logging.INFO)
+
+  # create formatter and add it to the handlers
+  formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+  # create file handler which logs even debug messages
+  fh = logging.FileHandler('run_train.log')
+  fh.setLevel(logging.INFO)
+  fh.setFormatter(formatter)
+  log.addHandler(fh)
+
   ##### Get input function and model function
   train_input_fn, train_record_info = data_utils.get_input_fn(
       record_info_dir=FLAGS.record_info_dir,

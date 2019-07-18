@@ -88,6 +88,8 @@
 
 每行文本包含三个输出要素，依次为，输入文本(已截断或补齐)／log-probability／log-probability/len(encoded_input)
 
+*注:* **predict_ref.py**中的预测方法单纯使用并发提速，可用于对比predict.py中同时采用并发与批量预测的方法；如果两个方法输出的概率数值有差异是正常现象(精确至小数点后4位)
+
 
 
 ## 原作者的实验成果
