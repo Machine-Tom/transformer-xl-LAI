@@ -151,12 +151,12 @@ elif [[ $1 == 'sent_log_prob' ]]; then
         --mem_len=${TEST_MEM_LEN} \
         --clamp_len=${TEST_CLAMP_LEN} \
         --same_length=True \
-        --pred_batch_size=${TEST_BSZ} \
+        --pred_batch_size=10 \
         --limit_len=100 \
         --num_core_per_host=${TEST_NUM_CORE} \
         --do_sent_log_pred=True \
         --input_txt_dir=input.txt \
-        --multiprocess=1 \
+        --multiprocess=10 \
         ${@:2}
 elif [[ $1 == 'sent_log_prob_ref' ]]; then
     echo 'Run estimate sentence log probability...'
