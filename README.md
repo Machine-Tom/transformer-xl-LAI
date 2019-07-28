@@ -18,7 +18,7 @@
 * 样本数据写于.txt文件，每一行文本代表一个样本文档(document: 可以是一句话，也可以是一篇文章)
 * 数据集必须拆分成train.txt/valid.txt/test.txt三个文件，放置于data/**XXX**/目录下(**XXX**是对应数据集名称，最好与全局参数FLAGS.dataset一致)。比如，用天猫评论进行训练，则数据放置于data/tmall/目录下，全剧参数FLAGS.dataset设置为"tmall"(此处为沿用原作者设置，如有需要可以更改)
 
-![image-20190710144022293](/Users/admin/Library/Application Support/typora-user-images/image-20190710144022293.png)
+![image-20190710144022293](dataset_sample.png)
 
 
 
@@ -35,7 +35,7 @@
 
 * **如果在脚本tmall_base_gpu.sh中不设置vocab_dir参数(默认为None)**，则完成语料编码后在tf/目录下生成vocabulary_**XXX**.txt文本文件 (**XXX**为字典名称，代码中设置为全局变量FLAGS.dataset对应值)
 
-  ![image-20190710163625471](/Users/admin/Library/Application Support/typora-user-images/image-20190710163625471.png)
+  ![image-20190710163625471](vocabulary_sample.png)
 
   (一行一个token，前面几行一般为特殊字符如<eos> <UNK>)
 
@@ -84,7 +84,7 @@
 
 *输出格式:*
 
-![image-20190715153115139](/Users/admin/Library/Application Support/typora-user-images/image-20190715153115139.png)
+![image-20190715153115139](sent_prob_pred_sample.png)
 
 每行文本包含三个输出要素，依次为，输入文本(已截断或补齐)／log-probability／log-probability/len(encoded_input)
 
