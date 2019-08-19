@@ -252,6 +252,11 @@ def sent_log_prob(input_txt_list, n_token, cutoffs, ps_device):
 
         sent_log_prob_list = []
 
+        def _cal_pplx(log_prob, sent_len):
+            pplx = pow(math.exp((-1)*log_prob), 1/(sent_len-1))
+
+            return pplx
+
         for i in range(len(input_txt_list)):
             #tf.logging.info('#time: {}'.format(time.time()))
             input_txt = input_txt_list[i]
@@ -297,7 +302,7 @@ def sent_log_prob(input_txt_list, n_token, cutoffs, ps_device):
 
                 log_prob = log_prob + log_prob_list[input_txt[token]]
             
-            sent_log_prob_list.append((log_prob, log_prob/len(input_txt)))
+            sent_log_prob_list.append(_cal_pplx(log_prob, len(input_txt)))
         
         return sent_log_prob_list
                         
@@ -375,13 +380,10 @@ def get_model_fn_for_inference(n_token, cutoffs):
     return model_fn
 
 def cut_pad(num_list, r_len, pad_value=0):
-    if len(num_list) == r_len:
+    if len(num_list) <= r_len:
         return num_list
-    elif len(num_list) > r_len:
-        return num_list[:r_len]
     else:
-        return num_list + [pad_value]*(r_len-len(num_list))
-
+        return num_list[:r_len]
 
 def main(unused_argv):
     del unused_argv  # Unused
@@ -442,7 +444,7 @@ def main(unused_argv):
 
         with open("non_batch_ref_output.txt", "w") as write_res:
             for i in range(len(txt_input)):
-                write_res.write(txt_input[i] + " " + str(encoded_txt_input[i]) + " " + str(res_l[i][0]) + " " + str(res_l[i][1]) + "\n")
+                write_res.write(txt_input[i] + " " + str(encoded_txt_input[i]) + " " + str(res_l[i]) + "\n")
         
         # Check whether the length of result is right; Make sure multiprocess work well
         print(len(res_l))

@@ -30,9 +30,10 @@ class Vocab(object):
     def sent_token_split(self, doc):
         doc_modified = re.sub(r' ', "", doc)
 
-        doc_modified = re.sub(r'。', "。 ", doc_modified)
-        doc_modified = re.sub(r'！', "！ ", doc_modified)
-        doc_modified = re.sub(r'？', "？ ", doc_modified)
+        doc_modified = re.sub(r'。', r"。 ", doc_modified)
+        doc_modified = re.sub(r'！', r"！ ", doc_modified)
+        doc_modified = re.sub(r'？', r"？ ", doc_modified)
+        doc_modified = re.sub('\t', " ", doc_modified)
     
         doc_split = re.split(r' ', doc_modified)
 
@@ -48,13 +49,16 @@ class Vocab(object):
             self.add_symbol('<S>')
             return ['<S>'] + symbols + ['<S>']
         elif add_eos:
+            """
             symbols = []
             for i in self.sent_token_split(line):
                 sent = list(i)
                 sent = ['<bos>'] + sent + ['<eos>']
                 symbols.extend(sent)
+            """
+            symbols = list(line)
 
-            return symbols
+            return ['<bos>'] + symbols + ['<eos>']
         else:
             symbols = list(line)
             return symbols

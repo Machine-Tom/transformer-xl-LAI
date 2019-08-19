@@ -13,15 +13,15 @@ D_HEAD=41
 D_INNER=2100
 
 # Training
-TGT_LEN=15
-MEM_LEN=15
+TGT_LEN=30
+MEM_LEN=30
 
 BSZ=64
 NUM_CORE=2
 
 # Testing
-TEST_TGT_LEN=15
-TEST_MEM_LEN=15
+TEST_TGT_LEN=30
+TEST_MEM_LEN=30
 TEST_CLAMP_LEN=-1
 TEST_BSZ=16
 TEST_NUM_CORE=1
@@ -129,7 +129,8 @@ elif [[ $1 == 'sent_gen' ]]; then
         --num_core_per_host=${TEST_NUM_CORE} \
         --do_sent_gen=True \
         --gen_len=10 \
-        --input_txt_dir=input.txt \
+        --input_file_dir=input.txt \
+        --output_file_dir=output.txt \
         ${@:2}
 elif [[ $1 == 'sent_log_prob' ]]; then
     echo 'Run estimate sentence log probability...'
@@ -155,7 +156,8 @@ elif [[ $1 == 'sent_log_prob' ]]; then
         --limit_len=100 \
         --num_core_per_host=${TEST_NUM_CORE} \
         --do_sent_log_pred=True \
-        --input_txt_dir=input.txt \
+        --input_file_dir=input.txt \
+        --output_file_dir=output.txt \
         --multiprocess=10 \
         ${@:2}
 elif [[ $1 == 'sent_log_prob_ref' ]]; then
@@ -181,8 +183,9 @@ elif [[ $1 == 'sent_log_prob_ref' ]]; then
         --limit_len=100 \
         --num_core_per_host=${TEST_NUM_CORE} \
         --do_sent_log_pred=True \
-        --input_txt_dir=input.txt \
-        --multiprocess=14 \
+        --input_file_dir=input.txt \
+        --output_file_dir=output.txt \
+        --multiprocess=2 \
         ${@:2}
 else
     echo 'unknown argment 1'

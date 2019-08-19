@@ -19,6 +19,8 @@ from postprocess import top_one_result, top_n_prob, gen_on_keyword, gen_diversit
 import numpy as np
 import multiprocessing
 import random
+import csv
+import pandas as pd
 
 # GPU config
 flags.DEFINE_integer("num_core_per_host", default=8, help="Number of cores per host")
@@ -28,7 +30,8 @@ flags.DEFINE_integer("multiprocess", default=2, lower_bound=1, help="Number of p
 flags.DEFINE_string("corpus_info_path", default="", help="Path to corpus-info.json file.")
 flags.DEFINE_string("model_dir", default=None, help="Estimator model_dir.")
 flags.DEFINE_string("dataset", "tmall", help="Dataset name.")
-flags.DEFINE_string("input_txt_dir", default=None, help="Input text_dir.")
+flags.DEFINE_string("input_file_dir", default=None, help="Input file_dir.")
+flags.DEFINE_string("output_file_dir", default=None, help="Output file_dir.")
 flags.DEFINE_bool("do_sent_gen", default=False, help="Whether to predict next word probability.")
 flags.DEFINE_bool("do_sent_log_pred", default=False, help="Whether to predict sentence log probability.")
 flags.DEFINE_integer("limit_len", default=50, help="Limited length of input sentence.")
@@ -252,8 +255,16 @@ def sent_log_prob(input_txt_list, n_token, cutoffs, ps_device):
 
         sent_log_prob_list = [[] for _ in range(per_core_bsz)]
 
-        for batch_id in range(input_txt_list.shape[1]):
-            input_batch = input_txt_list[:,batch_id,:]
+        def _cal_pplx(log_prob_list, sent_len):
+            log_prob = sum(log_prob_list[:sent_len-1])
+            #pplx = pow(math.exp((-1)*log_prob), 1/(sent_len-1))
+            pplx = math.exp((-1)*log_prob/(sent_len-1))
+
+            return pplx
+
+        for batch_id in range(input_txt_list[0].shape[1]):
+            input_batch = input_txt_list[0][:,batch_id,:]
+            input_lens = input_txt_list[1][:,batch_id]
 
             tower_mems_np = [
                 [np.zeros([FLAGS.mem_len, per_core_bsz, FLAGS.d_model], dtype=np.float32)
@@ -269,7 +280,7 @@ def sent_log_prob(input_txt_list, n_token, cutoffs, ps_device):
 
             #print("Encoded Input:", input_batch)
 
-            log_prob = [0]*per_core_bsz
+            log_probs = [[] for _ in range(per_core_bsz)]
 
             for token in range(1, input_batch.shape[-1]):
                 feed_dict = {}
@@ -296,10 +307,10 @@ def sent_log_prob(input_txt_list, n_token, cutoffs, ps_device):
                     e_sum = sum([math.exp(i) for i in tmp_list])
                     log_prob_list = [math.log(math.exp(i)) - math.log(e_sum) for i in tmp_list]
 
-                    log_prob[txt_id] = log_prob[txt_id] + log_prob_list[input_batch[txt_id][token]]
+                    log_probs[txt_id].append(log_prob_list[input_batch[txt_id][token]])
 
             for txt_id in range(per_core_bsz):
-                sent_log_prob_list[txt_id].append((log_prob[txt_id], log_prob[txt_id]/len(input_batch[txt_id])))
+                sent_log_prob_list[txt_id].append(_cal_pplx(log_probs[txt_id], input_lens[txt_id]))
         
         sent_log_prob_list_merge = []
         for i in range(per_core_bsz):
@@ -407,24 +418,54 @@ def main(unused_argv):
     if FLAGS.do_sent_log_pred:
         encoded_txt_input = []
         txt_input = []
-        with open(FLAGS.input_txt_dir, "r") as read_txt:
-            for input_txt in read_txt:
-                if len(input_txt.strip())!=0:
-                    txt_input.append(input_txt.strip())
-                    encoded_txt_input.append(list(tmp_Vocab.encode_sents(input_txt.strip(), \
-                        add_eos=True, ordered=True)))
+        input_csv = []
+        with open(FLAGS.input_file_dir, "r") as read_file:
+            csv_reader = csv.reader(read_file)
+            for line in csv_reader:
+                if line[0].strip() != 0:
+                    input_csv.append(line)
+            
+            for i in range(1, len(input_csv)):
+                txt_input.append(input_csv[i][0].strip())
+                encoded_txt_input.append(list(tmp_Vocab.encode_sents(input_csv[i][0].strip(), \
+                    add_eos=True, ordered=True)))
+
+        #txt_input = txt_input[:7]
+        #encoded_txt_input = encoded_txt_input[:7]
+
+        encoded_txt_input_len = [len(encoded_txt) if len(encoded_txt) <= FLAGS.limit_len else FLAGS.limit_len \
+             for encoded_txt in encoded_txt_input]
 
         encoded_txt_input = [cut_pad(line, FLAGS.limit_len, 0) for line in encoded_txt_input]
-        if len(encoded_txt_input) % FLAGS.pred_batch_size != 0:
-            encoded_txt_input = encoded_txt_input + \
-                [[0]*FLAGS.limit_len]*(FLAGS.pred_batch_size - (len(encoded_txt_input)%FLAGS.pred_batch_size))
-        encoded_txt_input = np.array(encoded_txt_input).reshape(FLAGS.pred_batch_size,-1,FLAGS.limit_len)
         
-        if FLAGS.multiprocess == 1:
-            log_prob_list = sent_log_prob(encoded_txt_input, n_token, cutoffs, "/gpu:1")
+        if len(encoded_txt_input) % FLAGS.pred_batch_size != 0:
+            pad_len = FLAGS.pred_batch_size - (len(encoded_txt_input)%FLAGS.pred_batch_size)
+            encoded_txt_input = encoded_txt_input + \
+                [[0]*FLAGS.limit_len]*pad_len
+            encoded_txt_input_len = encoded_txt_input_len + \
+                [FLAGS.limit_len]*pad_len
+
+        encoded_txt_input = np.array(encoded_txt_input).reshape(FLAGS.pred_batch_size,-1,FLAGS.limit_len)
+        encoded_txt_input_len = np.array(encoded_txt_input_len).reshape(FLAGS.pred_batch_size,-1)
+        input_csv[0].append("log_prob")
+        
+        if FLAGS.multiprocess == 1 or encoded_txt_input.shape[1]//FLAGS.multiprocess == 0:
+            log_prob_list = sent_log_prob((encoded_txt_input, encoded_txt_input_len), n_token, cutoffs, "/gpu:1")
+
+            if len(log_prob_list) != len(input_csv)-1:
+                raise ValueError("The length of log_prob list and the length of input_csv are not the same")
+            else:
+                for i in range(1, len(input_csv)):
+                    input_csv[i].append(log_prob_list[i-1])
+                output_df = pd.DataFrame(input_csv[1:], columns=input_csv[0])
+                output_df.to_csv(FLAGS.output_file_dir, sep=",", index=False, encoding="utf-8-sig")
+                
             with open("sent_logprob_pred.txt", "w") as write_res:
                 for i in range(len(txt_input)):
-                    write_res.write(txt_input[i]+" "+str(log_prob_list[i][0])+" "+str(log_prob_list[i][1])+"\n")
+                    write_res.write(txt_input[i]+"\t"+str(log_prob_list[i])+"\n")
+            
+            # Check whether the length of result is right; Make sure batch-predict work well
+            print(len(log_prob_list))
         else:
             pool = multiprocessing.Pool(FLAGS.multiprocess)
             parti_batch_num = encoded_txt_input.shape[1]//FLAGS.multiprocess
@@ -439,7 +480,9 @@ def main(unused_argv):
                 else:
                     end = (i+1)*parti_batch_num
                 pro_res_l.append(pool.apply_async(sent_log_prob, \
-                    args=(encoded_txt_input[:,i*parti_batch_num:end,:], n_token, cutoffs, "/gpu:1")))
+                    args=((encoded_txt_input[:,i*parti_batch_num:end,:], \
+                        encoded_txt_input_len[:,i*parti_batch_num:end]), \
+                        n_token, cutoffs, "/gpu:1")))
             
             res_l = [[] for _ in range(FLAGS.pred_batch_size)]
 
@@ -458,23 +501,21 @@ def main(unused_argv):
                 res_merge.extend(res_l[i])
             tf.logging.info('#time: {}'.format(time.time()))
 
+            if len(res_merge) != len(input_csv)-1:
+                raise ValueError("The length of log_prob list and the length of input_csv are not the same")
+            else:
+                for i in range(1, len(input_csv)):
+                    input_csv[i].append(res_merge[i-1])
+                output_df = pd.DataFrame(input_csv[1:], columns=input_csv[0])
+                output_df.to_csv(FLAGS.output_file_dir, sep=",", index=False, encoding="utf-8-sig")
+
             with open("sent_logprob_pred.txt", "w") as write_res:
                 for i in range(len(txt_input)):
-                    write_res.write(txt_input[i] + " " + str(res_merge[i][0]) + " " + str(res_merge[i][1]) + "\n")
+                    write_res.write(txt_input[i] + "\t" + str(res_merge[i]) + "\n")
             
             # Check whether the length of result is right; Make sure multiprocess work well
             print(len(res_merge))
     
-    elif  FLAGS.do_sent_gen:
-        txt_gen_list = []
-        with open(FLAGS.input_txt_dir, "r") as read_txt:
-            for input_txt in read_txt:
-                if len(input_txt.strip()) != 0:
-                    txt_gen_list.append(sent_gen(tmp_Vocab, input_txt.strip(), n_token, cutoffs, "/gpu:1"))
-        
-        with open("sent_generation.txt", "w") as write_res:
-            for line in txt_gen_list:
-                write_res.write(line + "\n")
         
 if __name__ == "__main__":
     tf.app.run()
