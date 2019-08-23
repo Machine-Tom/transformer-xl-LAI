@@ -33,7 +33,7 @@ flags.DEFINE_string("dataset", "tmall", help="Dataset name.")
 flags.DEFINE_string("input_file_dir", default=None, help="Input file_dir.")
 flags.DEFINE_string("output_file_dir", default=None, help="Output file_dir.")
 flags.DEFINE_bool("do_sent_gen", default=False, help="Whether to predict next word probability.")
-flags.DEFINE_bool("do_sent_log_pred", default=False, help="Whether to predict sentence log probability.")
+flags.DEFINE_bool("do_sent_ppl_pred", default=False, help="Whether to predict sentence perplexity.")
 flags.DEFINE_integer("limit_len", default=50, help="Limited length of input sentence.")
 flags.DEFINE_integer("gen_len", default=30, help="Number of token to generate.")
 flags.DEFINE_integer("pred_batch_size", default=16, help="Size of predition batch.")
@@ -177,7 +177,7 @@ def sent_gen(tmp_Vocab, input_txt, n_token, cutoffs, ps_device):
         return txt_gen
 
 
-def sent_log_prob(input_txt_list, n_token, cutoffs, ps_device):
+def sent_ppl(input_txt_list, n_token, cutoffs, ps_device):
 
     test_list = tf.placeholder(tf.int64, shape=[FLAGS.pred_batch_size, None])
     dataset = tf.data.Dataset.from_tensors(test_list)
@@ -253,14 +253,15 @@ def sent_log_prob(input_txt_list, n_token, cutoffs, ps_device):
                     tower_attn_prob,
                     'transformer/adaptive_embed/lookup_table:0']
 
-        sent_log_prob_list = [[] for _ in range(per_core_bsz)]
+        sent_ppl_list = [[] for _ in range(per_core_bsz)]
 
-        def _cal_pplx(log_prob_list, sent_len):
+        def _cal_ppl(log_prob_list, sent_len):
+            ### the first token of encoded txt is special token <bos>, so skip the first one
             log_prob = sum(log_prob_list[:sent_len-1])
             #pplx = pow(math.exp((-1)*log_prob), 1/(sent_len-1))
-            pplx = math.exp((-1)*log_prob/(sent_len-1))
+            ppl = math.exp((-1)*log_prob/(sent_len-1))
 
-            return pplx
+            return ppl
 
         for batch_id in range(input_txt_list[0].shape[1]):
             input_batch = input_txt_list[0][:,batch_id,:]
@@ -310,13 +311,13 @@ def sent_log_prob(input_txt_list, n_token, cutoffs, ps_device):
                     log_probs[txt_id].append(log_prob_list[input_batch[txt_id][token]])
 
             for txt_id in range(per_core_bsz):
-                sent_log_prob_list[txt_id].append(_cal_pplx(log_probs[txt_id], input_lens[txt_id]))
+                sent_ppl_list[txt_id].append(_cal_ppl(log_probs[txt_id], input_lens[txt_id]))
         
-        sent_log_prob_list_merge = []
+        sent_ppl_list_merge = []
         for i in range(per_core_bsz):
-            sent_log_prob_list_merge.extend(sent_log_prob_list[i])
+            sent_ppl_list_merge.extend(sent_ppl_list[i])
 
-        return sent_log_prob_list_merge
+        return sent_ppl_list_merge
                    
 
 def single_core_graph_for_inference(n_token, cutoffs, is_training, inp, mems, mems_id):
@@ -415,7 +416,7 @@ def main(unused_argv):
     tmp_Vocab.count_file("../data/{}/train.txt".format(FLAGS.dataset), add_eos=False)
     tmp_Vocab.build_vocab()
 
-    if FLAGS.do_sent_log_pred:
+    if FLAGS.do_sent_ppl_pred:
         encoded_txt_input = []
         txt_input = []
         input_csv = []
@@ -447,25 +448,22 @@ def main(unused_argv):
 
         encoded_txt_input = np.array(encoded_txt_input).reshape(FLAGS.pred_batch_size,-1,FLAGS.limit_len)
         encoded_txt_input_len = np.array(encoded_txt_input_len).reshape(FLAGS.pred_batch_size,-1)
-        input_csv[0].append("log_prob")
+        input_csv[0].append("ppl")
         
         if FLAGS.multiprocess == 1 or encoded_txt_input.shape[1]//FLAGS.multiprocess == 0:
-            log_prob_list = sent_log_prob((encoded_txt_input, encoded_txt_input_len), n_token, cutoffs, "/gpu:1")
-
-            if len(log_prob_list) != len(input_csv)-1:
-                raise ValueError("The length of log_prob list and the length of input_csv are not the same")
-            else:
-                for i in range(1, len(input_csv)):
-                    input_csv[i].append(log_prob_list[i-1])
-                output_df = pd.DataFrame(input_csv[1:], columns=input_csv[0])
-                output_df.to_csv(FLAGS.output_file_dir, sep=",", index=False, encoding="utf-8-sig")
+            ppl_list = sent_ppl((encoded_txt_input, encoded_txt_input_len), n_token, cutoffs, "/gpu:1")
+            
+            for i in range(1, len(input_csv)):
+                input_csv[i].append(ppl_list[i-1])
+            output_df = pd.DataFrame(input_csv[1:], columns=input_csv[0])
+            output_df.to_csv(FLAGS.output_file_dir, sep=",", index=False, encoding="utf-8-sig")
                 
-            with open("sent_logprob_pred.txt", "w") as write_res:
+            with open("sent_ppl_pred.txt", "w") as write_res:
                 for i in range(len(txt_input)):
-                    write_res.write(txt_input[i]+"\t"+str(log_prob_list[i])+"\n")
+                    write_res.write(txt_input[i]+"\t"+str(ppl_list[i])+"\n")
             
             # Check whether the length of result is right; Make sure batch-predict work well
-            print(len(log_prob_list))
+            print(len(ppl_list))
         else:
             pool = multiprocessing.Pool(FLAGS.multiprocess)
             parti_batch_num = encoded_txt_input.shape[1]//FLAGS.multiprocess
@@ -479,7 +477,7 @@ def main(unused_argv):
                     end = encoded_txt_input.shape[1]
                 else:
                     end = (i+1)*parti_batch_num
-                pro_res_l.append(pool.apply_async(sent_log_prob, \
+                pro_res_l.append(pool.apply_async(sent_ppl, \
                     args=((encoded_txt_input[:,i*parti_batch_num:end,:], \
                         encoded_txt_input_len[:,i*parti_batch_num:end]), \
                         n_token, cutoffs, "/gpu:1")))
@@ -500,16 +498,13 @@ def main(unused_argv):
             for i in range(FLAGS.pred_batch_size):
                 res_merge.extend(res_l[i])
             tf.logging.info('#time: {}'.format(time.time()))
+            
+            for i in range(1, len(input_csv)):
+                input_csv[i].append(res_merge[i-1])
+            output_df = pd.DataFrame(input_csv[1:], columns=input_csv[0])
+            output_df.to_csv(FLAGS.output_file_dir, sep=",", index=False, encoding="utf-8-sig")
 
-            if len(res_merge) != len(input_csv)-1:
-                raise ValueError("The length of log_prob list and the length of input_csv are not the same")
-            else:
-                for i in range(1, len(input_csv)):
-                    input_csv[i].append(res_merge[i-1])
-                output_df = pd.DataFrame(input_csv[1:], columns=input_csv[0])
-                output_df.to_csv(FLAGS.output_file_dir, sep=",", index=False, encoding="utf-8-sig")
-
-            with open("sent_logprob_pred.txt", "w") as write_res:
+            with open("sent_ppl_pred.txt", "w") as write_res:
                 for i in range(len(txt_input)):
                     write_res.write(txt_input[i] + "\t" + str(res_merge[i]) + "\n")
             

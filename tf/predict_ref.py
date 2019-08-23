@@ -9,6 +9,7 @@ import time
 from absl import flags
 from progressbar import ProgressBar
 import absl.logging as _logging  # pylint: disable=unused-import
+import csv
 
 import tensorflow as tf
 import model
@@ -17,6 +18,7 @@ from vocabulary import Vocab
 from gpu_utils import assign_to_gpu, average_grads_and_vars
 from postprocess import top_one_result, top_n_prob, gen_on_keyword, gen_diversity
 import numpy as np
+import pandas as pd
 import multiprocessing
 import random
 
@@ -28,9 +30,10 @@ flags.DEFINE_integer("multiprocess", default=2, help="Number of processes")
 flags.DEFINE_string("corpus_info_path", default="", help="Path to corpus-info.json file.")
 flags.DEFINE_string("model_dir", default=None, help="Estimator model_dir.")
 flags.DEFINE_string("dataset", "tmall", help="Dataset name.")
-flags.DEFINE_string("input_txt_dir", default=None, help="Input text_dir.")
+flags.DEFINE_string("input_file_dir", default=None, help="Input file_dir.")
+flags.DEFINE_string("output_file_dir", default=None, help="Output file_dir.")
 flags.DEFINE_bool("do_sent_gen", default=False, help="Whether to generate sentence.")
-flags.DEFINE_bool("do_sent_log_pred", default=False, help="Whether to predict sentence log probability.")
+flags.DEFINE_bool("do_sent_ppl_pred", default=False, help="Whether to predict sentence log probability.")
 flags.DEFINE_integer("limit_len", default=50, help="Limited length of input sentence.")
 flags.DEFINE_integer("gen_len", default=30, help="Number of token to generate.")
 
@@ -174,7 +177,7 @@ def sent_gen(tmp_Vocab, input_txt, n_token, cutoffs, ps_device):
         return txt_gen
 
 
-def sent_log_prob(input_txt_list, n_token, cutoffs, ps_device):
+def sent_ppl(input_txt_list, n_token, cutoffs, ps_device):
 
     test_list = tf.placeholder(tf.int64, shape=[1, None])
     dataset = tf.data.Dataset.from_tensors(test_list)
@@ -250,12 +253,12 @@ def sent_log_prob(input_txt_list, n_token, cutoffs, ps_device):
                     tower_attn_prob,
                     'transformer/adaptive_embed/lookup_table:0']
 
-        sent_log_prob_list = []
+        sent_ppl_list = []
 
-        def _cal_pplx(log_prob, sent_len):
-            pplx = pow(math.exp((-1)*log_prob), 1/(sent_len-1))
+        def _cal_ppl(log_prob, sent_len):
+            ppl = pow(math.exp((-1)*log_prob), 1/(sent_len-1))
 
-            return pplx
+            return ppl
 
         for i in range(len(input_txt_list)):
             #tf.logging.info('#time: {}'.format(time.time()))
@@ -302,9 +305,9 @@ def sent_log_prob(input_txt_list, n_token, cutoffs, ps_device):
 
                 log_prob = log_prob + log_prob_list[input_txt[token]]
             
-            sent_log_prob_list.append(_cal_pplx(log_prob, len(input_txt)))
+            sent_ppl_list.append(_cal_ppl(log_prob, len(input_txt)))
         
-        return sent_log_prob_list
+        return sent_ppl_list
                         
 
 def single_core_graph_for_inference(n_token, cutoffs, is_training, inp, mems, mems_id):
@@ -400,19 +403,25 @@ def main(unused_argv):
     tmp_Vocab.count_file("../data/{}/train.txt".format(FLAGS.dataset), add_eos=False)
     tmp_Vocab.build_vocab()
 
-    if FLAGS.do_sent_log_pred:
+    if FLAGS.do_sent_ppl_pred:
         encoded_txt_input = []
         txt_input = []
-        with open(FLAGS.input_txt_dir, "r") as read_txt:
-            for input_txt in read_txt:
-                if len(input_txt.strip())!=0:
-                    txt_input.append(input_txt.strip())
-                    encoded_txt_input.append(list(tmp_Vocab.encode_sents(input_txt.strip(), \
-                        add_eos=True, ordered=True)))
+        input_csv = []
+        with open(FLAGS.input_file_dir, "r") as read_file:
+            csv_reader = csv.reader(read_file)
+            for line in csv_reader:
+                if line[0].strip() != 0:
+                    input_csv.append(line)
+            
+            for i in range(1, len(input_csv)):
+                txt_input.append(input_csv[i][0].strip())
+                encoded_txt_input.append(list(tmp_Vocab.encode_sents(input_csv[i][0].strip(), \
+                    add_eos=True, ordered=True)))
 
-        encoded_txt_input = [cut_pad(line, FLAGS.limit_len, 0) for line in encoded_txt_input]
-
+        encoded_txt_input = [line[:FLAGS.limit_len] if len(line) > FLAGS.limit_len else line for line in encoded_txt_input]
         encoded_txt_input = np.array(encoded_txt_input)
+
+        input_csv[0].append("ppl")
 
         pool = multiprocessing.Pool(FLAGS.multiprocess)
         
@@ -427,7 +436,7 @@ def main(unused_argv):
                 end = len(encoded_txt_input)
             else:
                 end = (i+1)*parti_len
-            pro_res_l.append(pool.apply_async(sent_log_prob, \
+            pro_res_l.append(pool.apply_async(sent_ppl, \
                 args=(encoded_txt_input[i*parti_len:end], n_token, cutoffs, "/gpu:1")))
             
         res_l = []
@@ -441,6 +450,11 @@ def main(unused_argv):
         print('All subprocesses done.')
 
         tf.logging.info('#time: {}'.format(time.time()))
+
+        for i in range(1, len(input_csv)):
+            input_csv[i].append(res_l[i-1])
+        output_df = pd.DataFrame(input_csv[1:], columns=input_csv[0])
+        output_df.to_csv(FLAGS.output_file_dir, sep=",", index=False, encoding="utf-8-sig")
 
         with open("non_batch_ref_output.txt", "w") as write_res:
             for i in range(len(txt_input)):

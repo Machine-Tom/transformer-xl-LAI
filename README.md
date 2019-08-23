@@ -8,7 +8,7 @@
 ## TensorFlow代码使用
 
 - Source code在tf/目录下，已实现在多个GPU上训练模型以及多线程预测句子概率
-- 如需使用代码进行 数据预处理/模型训练/句子概率预测，需要先cd进入tf/目录底下，调用tf/scripts/目录下的tmall_base_gpu.sh脚本(原因是代码中有相对路径)；如需要 数据集训练/调整参数，只需要基于脚本tmall_base_gpu.sh进行调整修改
+- 如需使用代码进行 数据预处理/模型训练/句子概率预测，需要先cd进入tf/目录底下，调用tf/scripts/目录下的**product_review_base_gpu.sh**脚本(原因是代码中有相对路径)；如需要 数据集训练/调整参数，只需要基于脚本**product_review_base_gpu.sh**进行调整修改
 
 
 
@@ -16,9 +16,9 @@
 
 * 数据清洗根据实际需要进行，无特别要求
 * 样本数据写于.txt文件，每一行文本代表一个样本文档(document: 可以是一句话，也可以是一篇文章)
-* 数据集必须拆分成train.txt/valid.txt/test.txt三个文件，放置于data/**XXX**/目录下(**XXX**是对应数据集名称，最好与全局参数FLAGS.dataset一致)。比如，用天猫评论进行训练，则数据放置于data/tmall/目录下，全剧参数FLAGS.dataset设置为"tmall"(此处为沿用原作者设置，如有需要可以更改)
+* 数据集必须拆分成train.txt/valid.txt/test.txt三个文件，放置于data/**XXX**/目录下(**XXX**是对应数据集名称，最好与全局参数FLAGS.dataset一致)。比如，用商品评论进行训练，则数据放置于data/product_review/目录下，全局参数FLAGS.dataset设置为"product_review"(此处为沿用原作者设置，如有需要可以更改)
 
-![image-20190710144022293](dataset_sample.png)
+![dataset_sample](pic/dataset_sample.png)
 
 
 
@@ -26,20 +26,20 @@
 
 *脚本调用命令(在tf/目录下，下面命令都要在tf/目录下执行)：*
 
-* `bash scripts/tmall_base_gpu.sh train_data`
-* `bash scripts/tmall_base_gpu.sh test_data`
+* `bash scripts/product_review_base_gpu.sh train_data`
+* `bash scripts/product_review_base_gpu.sh test_data`
 
 *这两行命令作用为:*
 
 * 将train.txt/valid.txt与test.txt中数据转化为**.tfrecords**文件用于后续训练与测试
 
-* **如果在脚本tmall_base_gpu.sh中不设置vocab_dir参数(默认为None)**，则完成语料编码后在tf/目录下生成vocabulary_**XXX**.txt文本文件 (**XXX**为字典名称，代码中设置为全局变量FLAGS.dataset对应值)
+* **如果在脚本product_review_base_gpu.sh中不设置vocab_dir参数(默认为None)**，则完成语料编码后在tf/目录下生成vocabulary_**XXX**.txt文本文件 (**XXX**为字典名称，代码中设置为全局变量FLAGS.dataset对应值)
 
-  ![image-20190710163625471](vocabulary_sample.png)
+  ![vocabulary](pic/vocabulary.png)
 
-  (一行一个token，前面几行一般为特殊字符如<eos> <UNK>)
+  (一行一个token，前面几行一般为特殊字符如<bos> <eos> <UNK>)
 
-* **如果在脚本tmall_base_gpu.sh中设置vocab_dir参数**，则读取文本建立字典类对象
+* **如果在脚本product_review_base_gpu.sh中设置vocab_dir参数**，则读取文本建立字典类对象
 
 *主要代码改动:*
 
@@ -56,7 +56,7 @@
 
 *调用脚本:*
 
-* `bash scripts/tmall_base_gpu.sh train`
+* `bash scripts/product_review_base_gpu.sh train`
 
 *要留意的参数:*
 
@@ -69,11 +69,11 @@
 
 
 
-### 句子概率预测
+### 句子困惑度预测
 
-`bash scripts/tmall_base_gpu.sh sent_log_prob`
+`bash scripts/product_review_base_gpu.sh sent_ppl`
 
-每个要预测的文本单独一行，存为.txt文件，文件路径在参数input_txt_dir设置。输出结果写在sent_logprob_pred.txt文件中。
+要预测的数据存为.csv文件，第一列必须为待预测文本，文件路径在参数`input_file_dir`设置。输出结果写在`output_file_dir`指定文件中。
 
 *要留意的参数:*
 
@@ -84,11 +84,11 @@
 
 *输出格式:*
 
-![image-20190715153115139](sent_prob_pred_sample.png)
+![ppl_pred_dataset](pic/ppl_pred_dataset.png)
 
 每行文本包含三个输出要素，依次为，输入文本(已截断或补齐)／log-probability／log-probability/len(encoded_input)
 
-*注:* **predict_ref.py**中的预测方法单纯使用并发提速，可用于对比predict.py中同时采用并发与批量预测的方法；如果两个方法输出的概率数值有差异是正常现象(精确至小数点后4位)
+*注:* **predict_ref.py**中的预测方法单纯使用并发提速，可用于对比predict.py中同时采用并发与批量预测的方法
 
 
 
